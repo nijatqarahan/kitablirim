@@ -1,0 +1,77 @@
+name: Build Release (Play Store)
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: "Surum numarasi (her yuklemede 1 artirin: 1, 2, 3...)"
+        default: "1"
+        required: true
+      version_name:
+        description: "Surum adi"
+        default: "1.0"
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir app && unzip -q proje.zip -d app
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: cd app && npm install
+      - run: cd app && npx cap add android
+      - run: cp -r app/icon/res/. app/android/app/src/main/res/
+      - run: cd app && npx cap sync android
+      - name: Surum numarasi
+        run: |
+          F=app/android/app/build.gradle
+          sed -i "s/versionCode [0-9]*/versionCode ${{ inputs.version_code }}/" $F
+          sed -i "s/versionName \"[^\"]*\"/versionName \"${{ inputs.version_name }}\"/" $F
+          grep -n "versionCode\|versionName" $F
+      - name: Imza anahtari
+        run: |
+          mkdir -p keyout
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > kx.jks
+            echo "KSPASS=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+            echo "Kayitli anahtar kullaniliyor."
+          else
+            PASS=$(openssl rand -hex 12)
+            keytool -genkeypair -v -keystore kx.jks -alias kitapxana -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$PASS" -dname "CN=Kitapxana, O=Kitapxana, C=TR"
+            base64 -w0 kx.jks > keyout/KEYSTORE_B64.txt
+            echo -n "$PASS" > keyout/KEYSTORE_PASSWORD.txt
+            echo "KSPASS=$PASS" >> $GITHUB_ENV
+            echo "YENI anahtar olusturuldu. ANAHTAR-SAKLA dosyasini kaydedin!"
+          fi
+      - name: Derle
+        run: |
+          cd app/android && chmod +x gradlew
+          ./gradlew bundleRelease assembleRelease
+      - name: Imzala
+        run: |
+          mkdir -p out
+          AAB=$(ls app/android/app/build/outputs/bundle/release/*.aab | head -1)
+          cp "$AAB" out/kitapxana.aab
+          jarsigner -keystore kx.jks -storepass "$KSPASS" -keypass "$KSPASS" -sigalg SHA256withRSA -digestalg SHA-256 out/kitapxana.aab kitapxana
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          UNS=$(ls app/android/app/build/outputs/apk/release/*.apk | head -1)
+          $BT/zipalign -p -f 4 "$UNS" aligned.apk
+          $BT/apksigner sign --ks kx.jks --ks-key-alias kitapxana --ks-pass pass:"$KSPASS" --key-pass pass:"$KSPASS" --out out/kitapxana.apk aligned.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kitapxana-play-store
+          path: out/
+      - uses: actions/upload-artifact@v4
+        if: ${{ env.KEYSTORE_B64 == '' }}
+        with:
+          name: ANAHTAR-SAKLA
+          path: keyout/
